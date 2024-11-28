@@ -77,18 +77,23 @@ class SoundPlayer(QThread):
             self.finished.emit()  # Signal that playback is done
             
 class ScanThread(QThread):
-    update_instruction = pyqtSignal(str)
-    update_distance = pyqtSignal(str)
-    finished_scanning = pyqtSignal(str)
+    update_instruction = pyqtSignal(str)  # Emits the current instruction text
+    update_distance = pyqtSignal(str)    # Emits the distance feedback message
+    finished_scanning = pyqtSignal(str) # Emits the folder path upon scan completion
 
     def __init__(self, user_folder):
         super().__init__()
         self.user_folder = user_folder
-        self.uncropped_folder = os.path.join(self.user_folder, "uncropped")
-        self.augmented_folder = os.path.join(self.user_folder, "augmented")
-        
-        os.makedirs(self.uncropped_folder, exist_ok=True)  # Ensure uncropped folder exists
-        os.makedirs(self.augmented_folder, exist_ok=True)  # Ensure augmented folder exists
+        self.rgb_folder = os.path.join(self.user_folder, "rgb")
+        self.depth_folder = os.path.join(self.user_folder, "depth")
+        self.rgb_augmented_folder = os.path.join(self.user_folder, "rgb_augmented")
+        self.depth_augmented_folder = os.path.join(self.user_folder, "depth_augmented")
+
+        # Create folders
+        os.makedirs(self.rgb_folder, exist_ok=True)
+        os.makedirs(self.depth_folder, exist_ok=True)
+        os.makedirs(self.rgb_augmented_folder, exist_ok=True)
+        os.makedirs(self.depth_augmented_folder, exist_ok=True)
 
         self.instructions = [
             {"text": "Face forward", "audio": "audio/move.mp3"},
@@ -151,9 +156,9 @@ class ScanThread(QThread):
                 cropped_rgb = crop_face(rgb_frame, self.last_face_location)
                 cropped_depth = crop_face(depth_frame_resized, self.last_face_location)
 
-                # Save original images
-                rgb_filename = os.path.join(self.user_folder, f"rgb_{self.total_frame_count:04d}.png")
-                depth_filename = os.path.join(self.user_folder, f"depth_{self.total_frame_count:04d}.png")
+                # Save original images in their respective folders
+                rgb_filename = os.path.join(self.rgb_folder, f"rgb_{self.total_frame_count:04d}.png")
+                depth_filename = os.path.join(self.depth_folder, f"depth_{self.total_frame_count:04d}.png")
                 cv2.imwrite(rgb_filename, cropped_rgb)
                 cv2.imwrite(depth_filename, cropped_depth)
                 print(f"Captured cropped frame {self.total_frame_count} using last known location")
@@ -161,8 +166,8 @@ class ScanThread(QThread):
                 # Apply augmentations to RGB and depth images
                 augmented_pairs = augment_image_pair(cropped_rgb, cropped_depth)
                 for idx, (aug_rgb, aug_depth) in enumerate(augmented_pairs):
-                    aug_rgb_filename = os.path.join(self.augmented_folder, f"rgb_aug_{self.total_frame_count:04d}_{idx}.png")
-                    aug_depth_filename = os.path.join(self.augmented_folder, f"depth_aug_{self.total_frame_count:04d}_{idx}.png")
+                    aug_rgb_filename = os.path.join(self.rgb_augmented_folder, f"rgb_aug_{self.total_frame_count:04d}_{idx}.png")
+                    aug_depth_filename = os.path.join(self.depth_augmented_folder, f"depth_aug_{self.total_frame_count:04d}_{idx}.png")
                     cv2.imwrite(aug_rgb_filename, aug_rgb)
                     cv2.imwrite(aug_depth_filename, aug_depth)
                     print(f"Saved augmented pair: {aug_rgb_filename}, {aug_depth_filename}")
