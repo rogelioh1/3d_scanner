@@ -37,6 +37,30 @@ def crop_face(image, face_location):
     face = image[top:bottom, left:right]
     return cv2.resize(face, (256, 256))
 
+def augment_image_pair(rgb_image, depth_image):
+    augmented_pairs = []
+
+    # Flip the image horizontally
+    flipped_rgb = cv2.flip(rgb_image, 1)
+    flipped_depth = cv2.flip(depth_image, 1)
+    augmented_pairs.append((flipped_rgb, flipped_depth))
+
+    # Rotate the image
+    rows, cols, _ = rgb_image.shape
+    for angle in [15, -15]:  # Rotate by 15 degrees
+        M = cv2.getRotationMatrix2D((cols / 2, rows / 2), angle, 1)
+        rotated_rgb = cv2.warpAffine(rgb_image, M, (cols, rows))
+        rotated_depth = cv2.warpAffine(depth_image, M, (cols, rows))
+        augmented_pairs.append((rotated_rgb, rotated_depth))
+
+    # Adjust brightness for RGB only (depth remains unchanged)
+    for factor in [0.7, 1.3]:  # Darker and brighter
+        bright_rgb = np.clip(rgb_image * factor, 0, 255).astype(np.uint8)
+        augmented_pairs.append((bright_rgb, depth_image))  # Keep depth as-is
+
+    return augmented_pairs
+
+
 class SoundPlayer(QThread):
     finished = pyqtSignal()
 
@@ -61,7 +85,10 @@ class ScanThread(QThread):
         super().__init__()
         self.user_folder = user_folder
         self.uncropped_folder = os.path.join(self.user_folder, "uncropped")
-        os.makedirs(self.uncropped_folder, exist_ok=True)
+        self.augmented_folder = os.path.join(self.user_folder, "augmented")
+        
+        os.makedirs(self.uncropped_folder, exist_ok=True)  # Ensure uncropped folder exists
+        os.makedirs(self.augmented_folder, exist_ok=True)  # Ensure augmented folder exists
 
         self.instructions = [
             {"text": "Face forward", "audio": "audio/move.mp3"},
@@ -72,7 +99,7 @@ class ScanThread(QThread):
         ]
         self.completion_sound = "audio/complete.mp3"
         self.instruction_index = 0
-        self.max_frames_per_instruction = 40
+        self.max_frames_per_instruction = 60
         self.total_frame_count = 0
         self.distance_tolerance = 10
         self.depth_history = deque(maxlen=10)
@@ -106,48 +133,46 @@ class ScanThread(QThread):
             rgb_small = cv2.resize(rgb_frame, (0, 0), fx=0.25, fy=0.25)
             face_locations = face_recognition.face_locations(rgb_small)
 
-            if face_locations:
-                self.last_face_location = [coord * 4 for coord in face_locations[0]]
-                print(f"Face detected at: {self.last_face_location}")
-
-            avg_depth = np.mean(depth_frame) if depth_frame.size > 0 else 0
-            self.depth_history.append(avg_depth)
-            rolling_avg_depth = np.mean(self.depth_history)
-            print(f"Rolling average depth: {rolling_avg_depth}")
-
-            if rolling_avg_depth < MIN_DISTANCE - self.distance_tolerance:
-                self.update_distance.emit("Too close - move further away")
-                QThread.msleep(500)
+            if not face_locations:
+                # Skip frames where no face is detected
+                print("No face detected. Waiting...")
+                QThread.msleep(100)  # Wait briefly before trying again
                 continue
-            elif rolling_avg_depth > MAX_DISTANCE + self.distance_tolerance:
-                self.update_distance.emit("Too far - move closer")
-                QThread.msleep(500)
-                continue
-            else:
-                self.update_distance.emit("")
 
-            if self.last_face_location:
-                try:
-                    cropped_rgb = crop_face(rgb_frame, self.last_face_location)
-                    cropped_depth = crop_face(depth_frame, self.last_face_location)
+            # Scale face location back to original size
+            self.last_face_location = [coord * 4 for coord in face_locations[0]]
+            print(f"Face detected at: {self.last_face_location}")
 
-                    rgb_filename = os.path.join(self.user_folder, f"rgb_{self.total_frame_count:04d}.png")
-                    depth_filename = os.path.join(self.user_folder, f"depth_{self.total_frame_count:04d}.png")
-                    cv2.imwrite(rgb_filename, cropped_rgb)
-                    cv2.imwrite(depth_filename, cropped_depth)
+            # Match depth frame resolution to RGB frame resolution
+            depth_frame_resized = cv2.resize(depth_frame, (rgb_frame.shape[1], rgb_frame.shape[0]))
 
-                    print(f"Captured cropped frame {self.total_frame_count} using last known location")
-                except Exception as e:
-                    print(f"Error cropping using last known location: {e}")
-            else:
-                rgb_filename = os.path.join(self.uncropped_folder, f"rgb_full_{self.total_frame_count:04d}.png")
-                depth_filename = os.path.join(self.uncropped_folder, f"depth_full_{self.total_frame_count:04d}.png")
-                cv2.imwrite(rgb_filename, rgb_frame)
-                cv2.imwrite(depth_filename, depth_frame)
-                print(f"Captured full frame {self.total_frame_count} (no face detected)")
+            try:
+                # Crop RGB and Depth using the same coordinates
+                cropped_rgb = crop_face(rgb_frame, self.last_face_location)
+                cropped_depth = crop_face(depth_frame_resized, self.last_face_location)
+
+                # Save original images
+                rgb_filename = os.path.join(self.user_folder, f"rgb_{self.total_frame_count:04d}.png")
+                depth_filename = os.path.join(self.user_folder, f"depth_{self.total_frame_count:04d}.png")
+                cv2.imwrite(rgb_filename, cropped_rgb)
+                cv2.imwrite(depth_filename, cropped_depth)
+                print(f"Captured cropped frame {self.total_frame_count} using last known location")
+
+                # Apply augmentations to RGB and depth images
+                augmented_pairs = augment_image_pair(cropped_rgb, cropped_depth)
+                for idx, (aug_rgb, aug_depth) in enumerate(augmented_pairs):
+                    aug_rgb_filename = os.path.join(self.augmented_folder, f"rgb_aug_{self.total_frame_count:04d}_{idx}.png")
+                    aug_depth_filename = os.path.join(self.augmented_folder, f"depth_aug_{self.total_frame_count:04d}_{idx}.png")
+                    cv2.imwrite(aug_rgb_filename, aug_rgb)
+                    cv2.imwrite(aug_depth_filename, aug_depth)
+                    print(f"Saved augmented pair: {aug_rgb_filename}, {aug_depth_filename}")
+
+            except Exception as e:
+                print(f"Error cropping using last known location: {e}")
 
             self.total_frame_count += 1
 
+            # Move to the next instruction after capturing enough frames
             if self.total_frame_count % self.max_frames_per_instruction == 0:
                 self.instruction_index += 1
                 if self.instruction_index < len(self.instructions):
