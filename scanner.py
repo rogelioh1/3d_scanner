@@ -12,6 +12,7 @@ from PyQt5.QtGui import QPixmap, QImage, QFont, QPainter, QColor
 from PyQt5.QtCore import QTimer, Qt, QThread, pyqtSignal
 import face_recognition
 from collections import deque
+from PyQt5.QtWidgets import QProgressBar
 
 # Kinect distance thresholds (in depth sensor values)
 MIN_DISTANCE = 100  # minimum acceptable distance
@@ -79,6 +80,8 @@ class SoundPlayer(QThread):
 class ScanThread(QThread):
     update_instruction = pyqtSignal(str)  # Emits the current instruction text
     update_distance = pyqtSignal(str)    # Emits the distance feedback message
+    face_not_detected = pyqtSignal(str)  # Emits a message when no face is detected
+    update_progress = pyqtSignal(int)    # Emits the scanning progress percentage
     finished_scanning = pyqtSignal(str) # Emits the folder path upon scan completion
 
     def __init__(self, user_folder):
@@ -141,8 +144,12 @@ class ScanThread(QThread):
             if not face_locations:
                 # Skip frames where no face is detected
                 print("No face detected. Waiting...")
+                self.face_not_detected.emit("No face detected. Please align your face in the frame.")
                 QThread.msleep(100)  # Wait briefly before trying again
                 continue
+
+            # Clear face not detected message
+            self.face_not_detected.emit("")
 
             # Scale face location back to original size
             self.last_face_location = [coord * 4 for coord in face_locations[0]]
@@ -163,19 +170,20 @@ class ScanThread(QThread):
                 cv2.imwrite(depth_filename, cropped_depth)
                 print(f"Captured cropped frame {self.total_frame_count} using last known location")
 
-                # Apply augmentations to RGB and depth images
-                augmented_pairs = augment_image_pair(cropped_rgb, cropped_depth)
-                for idx, (aug_rgb, aug_depth) in enumerate(augmented_pairs):
-                    aug_rgb_filename = os.path.join(self.rgb_augmented_folder, f"rgb_aug_{self.total_frame_count:04d}_{idx}.png")
-                    aug_depth_filename = os.path.join(self.depth_augmented_folder, f"depth_aug_{self.total_frame_count:04d}_{idx}.png")
-                    cv2.imwrite(aug_rgb_filename, aug_rgb)
-                    cv2.imwrite(aug_depth_filename, aug_depth)
-                    print(f"Saved augmented pair: {aug_rgb_filename}, {aug_depth_filename}")
-
             except Exception as e:
                 print(f"Error cropping using last known location: {e}")
 
             self.total_frame_count += 1
+
+            # Calculate progress for the current instruction
+            instruction_progress = int((self.total_frame_count % self.max_frames_per_instruction) / self.max_frames_per_instruction * 100)
+
+            # Calculate overall progress
+            overall_progress = int((self.instruction_index / len(self.instructions) +
+                                    instruction_progress / 100 / len(self.instructions)) * 100)
+
+            # Emit progress updates
+            self.update_progress.emit(overall_progress)
 
             # Move to the next instruction after capturing enough frames
             if self.total_frame_count % self.max_frames_per_instruction == 0:
@@ -216,6 +224,19 @@ class KinectApp(QMainWindow):
         self.instruction_label.setAlignment(Qt.AlignCenter)
         self.layout.addWidget(self.instruction_label)
 
+        # Add face detection status label
+        self.face_status_label = QLabel("", self)
+        self.face_status_label.setFont(QFont("Arial", 12))
+        self.face_status_label.setStyleSheet("color: red;")
+        self.face_status_label.setAlignment(Qt.AlignCenter)
+        self.layout.addWidget(self.face_status_label)
+
+        # Add progress bar
+        self.progress_bar = QProgressBar(self)
+        self.progress_bar.setRange(0, 100)  # Progress from 0 to 100%
+        self.progress_bar.setValue(0)
+        self.layout.addWidget(self.progress_bar)
+
         # Add Begin Scan button
         self.begin_scan_button = QPushButton("Begin Scan", self)
         self.begin_scan_button.setFont(QFont("Arial", 14))
@@ -235,7 +256,6 @@ class KinectApp(QMainWindow):
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_camera_view)
         self.timer.start(30)
-
     def update_camera_view(self):
         # Fetch RGB frame
         self.rgb_frame = get_rgb_frame()
@@ -289,6 +309,8 @@ class KinectApp(QMainWindow):
         self.scan_thread = ScanThread(user_folder)
         self.scan_thread.update_instruction.connect(self.display_instruction)
         self.scan_thread.update_distance.connect(self.update_distance)
+        self.scan_thread.face_not_detected.connect(self.display_face_status)  # Connect face detection status
+        self.scan_thread.update_progress.connect(self.update_progress_bar)    # Connect progress bar updates
         self.scan_thread.finished_scanning.connect(self.on_scan_complete)
         self.scan_thread.start()
 
@@ -301,6 +323,12 @@ class KinectApp(QMainWindow):
     def on_scan_complete(self, user_folder):
         print(f"Registration completed. Data saved in {user_folder}")
         self.instruction_label.setText("Scan complete")
+
+    def display_face_status(self, message):
+        self.face_status_label.setText(message)
+
+    def update_progress_bar(self, value):
+        self.progress_bar.setValue(value)
 
     def closeEvent(self, event):
         # Cleanup on close
